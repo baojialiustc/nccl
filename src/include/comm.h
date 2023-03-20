@@ -104,6 +104,7 @@ struct ncclChannel {
   struct ncclTree tree;
   struct ncclTree collnetChain;
   struct ncclDirect collnetDirect;
+  struct ncclNvls nvls;
   int id; // index of this channel
   uint32_t workFifoSent; // last used work index+1
   uint64_t p2pOpCount;
@@ -171,11 +172,16 @@ struct ncclComm {
   uint64_t* connectSend;
   uint64_t* connectRecv;
 
+  uint64_t magic; // Magic number for all network communication. Not a security key -- only goal is to detect mismatches.
+
   int rank;    // my rank in the communicator
   int nRanks;  // number of GPUs in communicator
   int cudaDev; // my cuda device index
+  int compCap; // compute capability of the GPU
+  int minCompCap; // min compute capability in the communicator
   int64_t busId;   // my PCI bus ID in int format
   cpu_set_t cpuAffinity; // CPU affinity of the GPU
+  int cudaArch; // matches __CUDA_ARCH__ of device
 
   int node;
   int nNodes;
@@ -198,6 +204,7 @@ struct ncclComm {
 
   // Channels for collectives
   int nChannels;
+  int nvlsChannels;
   // Channels (per peer) for p2p
   int p2pnChannels;
   int p2pnChannelsPerPeer;
@@ -208,7 +215,7 @@ struct ncclComm {
 
   // Buffer sizes
   int buffSizes[NCCL_NUM_PROTOCOLS];
-  int p2pNetChunkSize;
+  int p2pChunkSize;
 
   // Algorithm/Protocols thresholds
   ssize_t threadThresholds[NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];
@@ -240,7 +247,6 @@ struct ncclComm {
   // Intra-process sync
   struct ncclComm* intraComm0; // leader of intra-process comms (self possible)
   struct ncclComm* intraNext; // next of intra-process comms, intraComm0 is head
-  int intraRefs; // reference count from intra-process comms (zero if not leader else intraRanks)
   int intraRank;
   int intraRanks;
   uint32_t intraBarrierPhase;
@@ -254,6 +260,10 @@ struct ncclComm {
   // Whether this communicator uses collNet
   int collNetSupport;
   int intraHighestTransportType;
+
+  // NVLink SHARP (NVLS) support
+  int nvlsSupport;
+  void* nvlsResources;
 
   size_t channelSize; // User requested work size (bytes) for channel partitions
 
@@ -286,6 +296,11 @@ struct ncclComm {
 
   // communicator mode
   int blocking;
+  // CGA cluster size
+  int cgaClusterSize;
+  int minCTAs, maxCTAs;
+  // network interface name
+  char *netName;
   // initState is to more conveniently reclaim resources when errors happen.
   ncclResult_t initState;
   // flag to indicate if ncclCommFinalize() is called
