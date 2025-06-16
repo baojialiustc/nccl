@@ -2,8 +2,8 @@
  * Copyright (c) 2017-2022, NVIDIA CORPORATION. All rights reserved.
  */
 
-#ifndef NCCL_NET_V6_H_
-#define NCCL_NET_V6_H_
+#ifndef NET_V6_H_
+#define NET_V6_H_
 
 typedef struct {
   char* name;     // Used mostly for logging.
@@ -17,8 +17,6 @@ typedef struct {
   int maxComms;   // Maximum number of comms we can create
   int maxRecvs;   // Maximum number of grouped receives.
 }ncclNetProperties_v6_t;
-
-typedef ncclNetProperties_v6_t ncclNetProperties_t;
 
 typedef struct {
   // Name of the network (mainly for logs)

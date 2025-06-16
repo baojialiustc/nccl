@@ -3,23 +3,30 @@
 #
 # See LICENSE.txt for license information
 #
-
 include ../makefiles/common.mk
 include ../makefiles/version.mk
 
 ##### src files
-INCEXPORTS  := nccl.h nccl_net.h
-LIBSRCFILES := init.cc init_nvtx.cc channel.cc bootstrap.cc transport.cc enqueue.cc group.cc debug.cc proxy.cc net.cc \
-		misc/cudawrap.cc misc/nvmlwrap.cc misc/ibvsymbols.cc misc/ibvwrap.cc misc/gdrwrap.cc \
-		misc/utils.cc misc/argcheck.cc misc/socket.cc misc/shmutils.cc misc/profiler.cc misc/param.cc misc/strongstream.cc \
-		misc/ipcsocket.cc \
-		transport/p2p.cc transport/shm.cc transport/net.cc transport/net_socket.cc transport/net_ib.cc transport/coll_net.cc transport/nvls.cc \
-                collectives/sendrecv.cc collectives/all_reduce.cc collectives/all_gather.cc collectives/broadcast.cc collectives/reduce.cc collectives/reduce_scatter.cc \
-                graph/topo.cc graph/paths.cc graph/search.cc graph/connect.cc graph/rings.cc graph/trees.cc graph/tuning.cc graph/xml.cc
+INCEXPORTS  := nccl.h
+LIBSRCFILES := \
+	bootstrap.cc channel.cc collectives.cc debug.cc enqueue.cc group.cc \
+	init.cc init_nvtx.cc proxy.cc transport.cc mnnvl.cc allocator.cc symmetric.cc \
+	$(wildcard graph/*.cc) \
+	$(wildcard misc/*.cc) \
+	$(wildcard transport/*.cc) \
+	$(wildcard register/*.cc) \
+	$(wildcard plugin/*.cc) \
+	$(wildcard plugin/net/*.cc) \
+	$(wildcard plugin/tuner/*.cc) \
+	$(wildcard plugin/profiler/*.cc) \
+	$(filter-out ras/client.cc,$(wildcard ras/*.cc))
+BINSRCFILES := ras/client.cc
 
 ##### lib files
 LIBNAME     := libnccl.so
 STATICLIBNAME := libnccl_static.a
+##### binaries
+BINNAME := ncclras
 ##### pkgconfig files
 PKGCONFIGFILE := nccl.pc
 ##### dirs
@@ -28,11 +35,12 @@ INCDIR := $(BUILDDIR)/include
 LIBDIR := $(BUILDDIR)/lib
 OBJDIR := $(BUILDDIR)/obj
 PKGDIR := $(BUILDDIR)/lib/pkgconfig
+BINDIR := $(BUILDDIR)/bin
 ##### target files
 CUDARTLIB  ?= cudart_static
 
+# Use compatibility shim only with static cudart; see https://github.com/NVIDIA/nccl/issues/658
 ifeq ($(CUDARTLIB), cudart_static)
-	# Use compatibility shim only with static cudart; see https://github.com/NVIDIA/nccl/issues/658
 	LIBSRCFILES += enhcompat.cc
 endif
 
@@ -42,20 +50,24 @@ LIBTARGET  := $(LIBNAME:%=%.$(NCCL_MAJOR).$(NCCL_MINOR).$(NCCL_PATCH))
 STATICLIBTARGET := $(STATICLIBNAME)
 PKGTARGET  := $(PKGCONFIGFILE)
 LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
-DEPFILES   := $(LIBOBJ:%.o=%.d)
+BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
+DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
 LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
+INCPLUGIN  := include/plugin
 
-DEVICELIB  := $(BUILDDIR)/obj/collectives/device/colldevice.a
+DEVMANIFEST := $(BUILDDIR)/obj/device/manifest
 
 ##### rules
-build : lib staticlib
+build : lib staticlib binary
 
 lib : $(INCTARGETS) $(LIBDIR)/$(LIBTARGET) $(PKGDIR)/$(PKGTARGET)
 
 staticlib : $(LIBDIR)/$(STATICLIBTARGET)
 
-$(DEVICELIB): ALWAYS_REBUILD $(INCTARGETS)
-	$(MAKE) -C collectives/device
+binary : $(BINDIR)/$(BINNAME)
+
+$(DEVMANIFEST): ALWAYS_REBUILD $(INCTARGETS)
+	$(MAKE) -C ./device
 
 # Empty target to force rebuild
 ALWAYS_REBUILD:
@@ -75,21 +87,22 @@ $(INCDIR)/nccl.h : nccl.h.in ../makefiles/version.mk
 	    -e "s/\$${nccl:Version}/$(NCCL_VERSION)/g" \
 	    $< > $@
 
-$(LIBDIR)/$(LIBTARGET): $(LIBOBJ) $(DEVICELIB)
+$(LIBDIR)/$(LIBTARGET): $(LIBOBJ) $(DEVMANIFEST)
 	@printf "Linking    %-35s > %s\n" $(LIBTARGET) $@
 	mkdir -p $(LIBDIR)
-	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -o $@ $(LIBOBJ) $(DEVICELIB) $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
 	ln -sf $(LIBSONAME) $(LIBDIR)/$(LIBNAME)
 	ln -sf $(LIBTARGET) $(LIBDIR)/$(LIBSONAME)
 
-null :=
-space := $(null) #
-comma := ,
-
-$(LIBDIR)/$(STATICLIBTARGET): $(LIBOBJ) $(DEVICELIB)
+$(LIBDIR)/$(STATICLIBTARGET): $(LIBOBJ) $(DEVMANIFEST)
 	@printf "Archiving  %-35s > %s\n" $(STATICLIBTARGET) $@
 	mkdir -p $(LIBDIR)
-	printf "create $@\naddlib $(DEVICELIB)\naddmod $(subst $(space),$(comma),$(strip $(LIBOBJ)))\nsave\nend" | ar -M
+	ar cr $@ $(LIBOBJ) $$(cat $(DEVMANIFEST))
+
+$(BINDIR)/$(BINNAME): $(BINOBJ)
+	@printf "Linking    %-35s > %s\n" $(BINNAME) $@
+	mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 $(PKGDIR)/nccl.pc : nccl.pc.in
 	mkdir -p $(PKGDIR)
@@ -118,24 +131,26 @@ $(PKGDIR)/%.pc : %.pc
 $(OBJDIR)/%.o : %.cc $(INCTARGETS)
 	@printf "Compiling  %-35s > %s\n" $< $@
 	mkdir -p `dirname $@`
-	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -c $< -o $@
-	@$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -M $< > $(@:%.o=%.d.tmp)
+	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -c $< -o $@
+	@$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -M $< > $(@:%.o=%.d.tmp)
 	@sed "0,/^.*:/s//$(subst /,\/,$@):/" $(@:%.o=%.d.tmp) > $(@:%.o=%.d)
 	@sed -e 's/.*://' -e 's/\\$$//' < $(@:%.o=%.d.tmp) | fmt -1 | \
                 sed -e 's/^ *//' -e 's/$$/:/' >> $(@:%.o=%.d)
 	@rm -f $(@:%.o=%.d.tmp)
 
 clean :
-	$(MAKE) -C collectives/device clean
-	rm -rf ${INCDIR} ${LIBDIR} ${PKGDIR} ${OBJDIR}
+	$(MAKE) -C device clean
+	rm -rf ${BINDIR} ${INCDIR} ${LIBDIR} ${PKGDIR} ${OBJDIR}
 
 install : build
 	mkdir -p $(PREFIX)/lib
 	mkdir -p $(PREFIX)/lib/pkgconfig
 	mkdir -p $(PREFIX)/include
+	mkdir -p $(PREFIX)/bin
 	cp -P -v $(BUILDDIR)/lib/lib* $(PREFIX)/lib/
 	cp -P -v $(BUILDDIR)/lib/pkgconfig/* $(PREFIX)/lib/pkgconfig/
 	cp -v $(BUILDDIR)/include/* $(PREFIX)/include/
+	cp -v $(BUILDDIR)/bin/ncclras $(PREFIX)/bin/
 
 FILESTOFORMAT := $(shell find . -name ".\#*" -prune -o \( -name "*.cc" -o -name "*.h" \) -print | grep -v -E 'ibvwrap.h|nvmlwrap.h|gdrwrap.h|nccl.h')
 # Note that formatting.mk defines a new target so in order to not overwrite the default target,

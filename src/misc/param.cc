@@ -32,12 +32,13 @@ void setEnvFile(const char* fileName) {
   size_t n = 0;
   ssize_t read;
   while ((read = getline(&line, &n, file)) != -1) {
+    if (line[0] == '#') continue;
     if (line[read-1] == '\n') line[read-1] = '\0';
     int s=0; // Env Var Size
     while (line[s] != '\0' && line[s] != '=') s++;
     if (line[s] == '\0') continue;
     strncpy(envVar, line, std::min(1023,s));
-    envVar[s] = '\0';
+    envVar[std::min(1023,s)] = '\0';
     s++;
     strncpy(envValue, line+s, 1023);
     envValue[1023]='\0';
@@ -48,22 +49,33 @@ void setEnvFile(const char* fileName) {
   fclose(file);
 }
 
-void initEnv() {
+static void initEnvFunc() {
   char confFilePath[1024];
-  const char * userDir = userHomeDir();
-  if (userDir) {
-    sprintf(confFilePath, "%s/.nccl.conf", userDir);
+  const char* userFile = getenv("NCCL_CONF_FILE");
+  if (userFile && strlen(userFile) > 0) {
+    snprintf(confFilePath, sizeof(confFilePath), "%s", userFile);
     setEnvFile(confFilePath);
+  } else {
+    const char* userDir = userHomeDir();
+    if (userDir) {
+      snprintf(confFilePath, sizeof(confFilePath), "%s/.nccl.conf", userDir);
+      setEnvFile(confFilePath);
+    }
   }
-  sprintf(confFilePath, "/etc/nccl.conf");
+  snprintf(confFilePath, sizeof(confFilePath), "/etc/nccl.conf");
   setEnvFile(confFilePath);
+}
+
+void initEnv() {
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  pthread_once(&once, initEnvFunc);
 }
 
 void ncclLoadParam(char const* env, int64_t deftVal, int64_t uninitialized, int64_t* cache) {
   static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_lock(&mutex);
   if (__atomic_load_n(cache, __ATOMIC_RELAXED) == uninitialized) {
-    char* str = getenv(env);
+    const char* str = ncclGetEnv(env);
     int64_t value = deftVal;
     if (str && strlen(str) > 0) {
       errno = 0;
@@ -78,4 +90,9 @@ void ncclLoadParam(char const* env, int64_t deftVal, int64_t uninitialized, int6
     __atomic_store_n(cache, value, __ATOMIC_RELAXED);
   }
   pthread_mutex_unlock(&mutex);
+}
+
+const char* ncclGetEnv(const char* name) {
+  initEnv();
+  return getenv(name);
 }
